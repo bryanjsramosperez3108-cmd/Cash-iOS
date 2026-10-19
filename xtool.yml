@@ -1,0 +1,13 @@
+version: 1
+bundleID: com.example.Taxes
+
+infoPath: Cash-Info.plist
+resources:
+  - Resources/Banco_Occidente.png
+  - Resources/BAC.png
+  - Resources/Banco_Atlantida.png
+  - Resources/Cooperativa_Sagrada_Familia.png
+  - Resources/CashLogo.png
+  - Resources/CashIngreso.wav
+  - Resources/CashGasto.wav
+iconPath: Resources/AppIcon.png
