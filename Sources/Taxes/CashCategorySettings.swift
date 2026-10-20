@@ -53,10 +53,20 @@ struct CashSettings: View {
                             .foregroundStyle(CashTheme.blue)
                     }
                 }
+                Section("Añadir cuentas") {
+                    NavigationLink {
+                        CashAccountManager(store: store)
+                    } label: {
+                        Label("Administrar mis cuentas", systemImage: "building.columns.circle.fill")
+                            .foregroundStyle(CashTheme.blue)
+                    }
+                    Text("Crea nuevas cuentas y modifica el nombre, la imagen y el saldo disponible de las existentes.")
+                        .font(.caption).foregroundStyle(CashTheme.muted)
+                }
                 Section {
-                    ForEach(CashAccount.allCases) { account in
+                    ForEach(store.accounts) { account in
                         VStack(alignment: .leading, spacing: 6) {
-                            Text(account.name)
+                            Text(store.accountName(account))
                                 .font(.footnote.weight(.medium))
                                 .foregroundStyle(CashTheme.muted)
                             Text("SALDO DISPONIBLE")
@@ -87,6 +97,10 @@ struct CashSettings: View {
                     Button(action: createBackup) {
                         Label("Crear copia de seguridad", systemImage: "square.and.arrow.up")
                     }
+                    let categoriasRespaldo = store.ledger.categoryItems ?? CashUserCategory.defaults
+                    Text("Categorías incluidas en el respaldo: \(categoriasRespaldo.filter { $0.kind == .income }.count) de ingresos, \(categoriasRespaldo.filter { $0.kind == .expense }.count) de gastos y \(categoriasRespaldo.filter { $0.kind == .transfer }.count) de transferencias. Imágenes personalizadas: \(categoriasRespaldo.filter { $0.iconData != nil }.count).")
+                        .font(.caption)
+                        .foregroundStyle(CashTheme.muted)
                     Button {
                         importingBackup = true
                     } label: {
@@ -95,13 +109,13 @@ struct CashSettings: View {
                 } header: {
                     Text("Copias de seguridad")
                 } footer: {
-                    Text("Guarda el archivo JSON en Archivos, iCloud Drive o compártelo por AirDrop. Contiene todos tus saldos, movimientos, categorías e imágenes; no está cifrado. Protégelo como información financiera personal.")
+                    Text("El JSON conserva las categorías de ingresos, gastos y transferencias, incluidos sus nombres, símbolos e imágenes personalizadas. Contiene también saldos y movimientos. No está cifrado: guárdalo de forma privada. Restaurar reemplaza todos los datos actuales.")
                 }
                 Section("Información") {
                     LabeledContent("Aplicación", value: "Cash")
                     LabeledContent("Moneda", value: "Lempira hondureño (HNL)")
                     LabeledContent("Movimientos", value: "\(store.ledger.operations.count)")
-                    Text("Powered by Bryan Ramos")
+                    Text("© 2026 Bryan Ramos. Todos los derechos reservados.")
                         .font(.caption).foregroundStyle(CashTheme.muted)
                 }
             }
@@ -168,6 +182,8 @@ struct CashCategoryManager: View {
     @ObservedObject var store: CashStore
     let kind: CashKind
     @State private var editing: CashUserCategory?
+    @State private var deleting: CashUserCategory?
+    @State private var deletionError: String?
     private var title: String {
         switch kind {
         case .income: "Categorías de ingresos"
@@ -192,9 +208,14 @@ struct CashCategoryManager: View {
                         .padding(.vertical, 3)
                     }
                     .buttonStyle(.plain)
+                    .swipeActions(edge: .trailing) {
+                        Button(role: .destructive) { deleting = item } label: {
+                            Label("Eliminar", systemImage: "trash")
+                        }
+                    }
                 }
             } footer: {
-                Text("Toca una categoría para cambiar su nombre, símbolo o imagen. Los movimientos anteriores conservan su asociación.")
+                Text("Desliza una categoría a la izquierda para eliminarla. Sus movimientos se conservarán y, si es necesario, pasarán a 'Otros'.")
             }
         }
         .scrollContentBackground(.hidden)
@@ -212,6 +233,26 @@ struct CashCategoryManager: View {
         .sheet(item: $editing) { item in
             CashCategoryEditor(store: store, item: item)
         }
+        .confirmationDialog("¿Eliminar categoría?", isPresented: Binding(
+            get: { deleting != nil }, set: { if !$0 { deleting = nil } }
+        ), titleVisibility: .visible) {
+            Button("Cancelar", role: .cancel) { deleting = nil }
+            Button("Eliminar categoría", role: .destructive) {
+                guard let item = deleting else { return }
+                deleting = nil
+                do { try store.deleteCategory(item) }
+                catch { deletionError = error.localizedDescription }
+            }
+        } message: {
+            if let item = deleting {
+                let count = store.categoryLinkedCount(item)
+                Text(count == 0 ? "Solo se eliminará la categoría; no se borrará ningún movimiento." : "Se conservarán los \(count) movimientos y se reasignarán a la categoría 'Otros' del mismo tipo. Esta acción no se puede deshacer.")
+            }
+        }
+        .alert("No se pudo eliminar", isPresented: Binding(
+            get: { deletionError != nil }, set: { if !$0 { deletionError = nil } }
+        )) { Button("Entendido") { deletionError = nil } }
+        message: { Text(deletionError ?? "") }
     }
 }
 
@@ -321,7 +362,7 @@ struct CashCategoryEditor: View {
                     }
                     .padding(.vertical, 8)
                 }
-                if !item.isBuiltIn && !item.name.isEmpty {
+                if store.categories(for: item.kind).contains(where: { $0.id == item.id }) {
                     Section {
                         Button("Eliminar categoría", role: .destructive) { confirmDelete = true }
                     }
@@ -365,7 +406,7 @@ struct CashCategoryEditor: View {
                 Button("Eliminar categoría", role: .destructive) { delete() }
                 Button("Cancelar", role: .cancel) { }
             } message: {
-                Text("Si tiene movimientos asociados, Cash impedirá eliminarla para conservar sus datos.")
+                Text("Los movimientos no se eliminarán. Si esta categoría contiene operaciones, Cash las trasladará a 'Otros' del mismo tipo.")
             }
             .alert("Revisa la categoría", isPresented: Binding(
                 get: { errorText != nil }, set: { if !$0 { errorText = nil } }
@@ -402,7 +443,7 @@ struct CashCategoryEditor: View {
 
 
 // Selector UIKit compatible con iOS, evitando PhotosPickerItem del SDK PhotosUI.
-private struct CashPhotoLibraryPicker: UIViewControllerRepresentable {
+struct CashPhotoLibraryPicker: UIViewControllerRepresentable {
     @Environment(\.dismiss) private var dismiss
     var onImage: (UIImage) -> Void
 

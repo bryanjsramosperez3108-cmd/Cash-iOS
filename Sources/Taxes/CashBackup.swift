@@ -37,15 +37,44 @@ enum CashBackupService {
         guard ledger.schemaVersion == 2 else {
             throw CashStoreError.message("La versión de tus datos no es compatible con las copias de seguridad.")
         }
-        let encodedLedger = try stableLedgerData(ledger)
+        // CASH V9: exporta explícitamente las categorías aunque provengan del catálogo inicial.
+        // Las personalizadas ya viven dentro de ledger.categoryItems, con sus imágenes en iconData.
+        // No se sustituyen las categorías modificadas por el usuario ni se cambia el almacén del iPhone.
+        var snapshot = ledger
+        if snapshot.categoryItems == nil {
+            snapshot.categoryItems = CashUserCategory.defaults
+        }
+        // V10: incluir las cinco cuentas de origen incluso si siguen sin editarse.
+        if snapshot.accountItems == nil {
+            snapshot.accountItems = CashUserAccount.defaults
+        }
+        guard let categorias = snapshot.categoryItems,
+              categorias.count <= 2000,
+              categorias.allSatisfy({ ($0.iconData?.count ?? 0) <= 400_000 }) else {
+            throw CashStoreError.message("No se pueden exportar categorías o imágenes inválidas.")
+        }
+        let encodedLedger = try stableLedgerData(snapshot)
         let document = CashPortableBackup(format: formatName, backupVersion: 1,
-                                          createdAt: Date(), ledger: ledger,
+                                          createdAt: Date(), ledger: snapshot,
                                           ledgerSHA256: digest(encodedLedger))
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let contents = try encoder.encode(document)
         guard contents.count < maxFileBytes else {
             throw CashStoreError.message("El archivo es demasiado grande. Reduce las imágenes personalizadas antes de exportar.")
+        }
+        // V9: comprueba ANTES de compartir que el JSON se pueda decodificar y que
+        // conserva cada categoría, símbolo, imagen, movimiento y saldo original.
+        let comprobacion = try JSONDecoder().decode(CashPortableBackup.self, from: contents)
+        let led = comprobacion.ledger
+        guard led.categoryItems == snapshot.categoryItems,
+              led.operations == snapshot.operations,
+              led.openingCents == snapshot.openingCents,
+              led.balanceAdjustments == snapshot.balanceAdjustments,
+              led.historicalTrackingSince == snapshot.historicalTrackingSince,
+              led.accountItems == snapshot.accountItems,
+              comprobacion.ledgerSHA256 == digest(try stableLedgerData(led)) else {
+            throw CashStoreError.message("El respaldo no superó la comprobación de integridad; no se compartió ningún archivo.")
         }
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")

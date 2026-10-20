@@ -62,37 +62,41 @@ struct CashSplash: View {
     @State private var revealed = false
     @State private var illuminated = false
 
+    // Se carga una sola vez; evita volver a decodificar el PNG en cada frame.
+    private static let cachedLogo: UIImage? = {
+        guard let path = Bundle.main.path(forResource: "CashLogo", ofType: "png") else { return nil }
+        return UIImage(contentsOfFile: path)
+    }()
+
     var body: some View {
         GeometryReader { geometry in
             ZStack {
                 CashTheme.background.ignoresSafeArea()
-                RadialGradient(
-                    colors: [CashTheme.blue.opacity(illuminated ? 0.30 : 0.06), .clear],
-                    center: .center, startRadius: 12, endRadius: 310
-                )
-                .ignoresSafeArea()
 
-                // Un halo y destello elegantes detrás del logo original.
+                // Animación liviana: sin blur animado ni gradientes giratorios.
                 Circle()
-                    .stroke(
-                        AngularGradient(
-                            colors: [.clear, CashTheme.blue.opacity(0.10),
-                                     Color.cyan.opacity(0.65), .clear],
-                            center: .center
-                        ),
-                        lineWidth: 3
-                    )
+                    .fill(RadialGradient(
+                        colors: [CashTheme.blue.opacity(0.24), CashTheme.blue.opacity(0.06), .clear],
+                        center: .center,
+                        startRadius: 15,
+                        endRadius: 175
+                    ))
                     .frame(width: min(geometry.size.width * 0.95, 370),
                            height: min(geometry.size.width * 0.95, 370))
-                    .blur(radius: illuminated ? 1 : 9)
-                    .rotationEffect(.degrees(illuminated ? 35 : -65))
-                    .opacity(illuminated ? 1 : 0)
+                    .scaleEffect(illuminated ? 1.04 : 0.82)
+                    .opacity(illuminated ? 1 : 0.25)
+
+                Circle()
+                    .strokeBorder(CashTheme.blue.opacity(0.36), lineWidth: 2)
+                    .frame(width: min(geometry.size.width * 0.94, 365),
+                           height: min(geometry.size.width * 0.94, 365))
+                    .scaleEffect(illuminated ? 1 : 0.83)
+                    .opacity(revealed ? 0.80 : 0)
 
                 VStack(spacing: 16) {
                     Spacer()
                     Group {
-                        if let path = Bundle.main.path(forResource: "CashLogo", ofType: "png"),
-                           let image = UIImage(contentsOfFile: path) {
+                        if let image = Self.cachedLogo {
                             Image(uiImage: image).resizable().scaledToFit()
                         } else {
                             Image(systemName: "wallet.pass.fill")
@@ -101,15 +105,15 @@ struct CashSplash: View {
                     }
                     .frame(width: min(geometry.size.width * 0.86, 356),
                            height: min(geometry.size.width * 0.86, 356))
-                    .scaleEffect(revealed ? 1 : 0.69)
+                    .scaleEffect(revealed ? 1 : 0.76)
                     .opacity(revealed ? 1 : 0)
-                    .offset(y: revealed ? -5 : 24)
-                    .shadow(color: CashTheme.blue.opacity(illuminated ? 0.54 : 0), radius: 39)
+                    .offset(y: revealed ? -5 : 16)
+                    .shadow(color: CashTheme.blue.opacity(illuminated ? 0.30 : 0), radius: 16)
                     Text("Cash")
                         .font(.system(size: 44, weight: .bold, design: .rounded))
                         .foregroundStyle(.white)
                         .opacity(revealed ? 1 : 0)
-                        .offset(y: revealed ? 0 : 18)
+                        .offset(y: revealed ? 0 : 12)
                     Spacer()
                     Text("Powered by Bryan Ramos")
                         .font(.footnote.weight(.medium))
@@ -121,12 +125,8 @@ struct CashSplash: View {
             }
         }
         .onAppear {
-            withAnimation(.spring(response: 0.72, dampingFraction: 0.77)) {
-                revealed = true
-            }
-            withAnimation(.easeInOut(duration: 1.55)) {
-                illuminated = true
-            }
+            withAnimation(.easeOut(duration: 0.75)) { revealed = true }
+            withAnimation(.easeInOut(duration: 1.45)) { illuminated = true }
         }
         .accessibilityElement(children: .combine)
     }
@@ -293,7 +293,7 @@ struct CashHome: View {
                         }
                         CashSectionTitle("Mis cuentas")
                         institution(.cash)
-                        ForEach(CashAccount.allCases.filter { $0 != .cash }) { account in
+                        ForEach(store.accounts.filter { $0 != .cash }) { account in
                             institution(account)
                         }
                         totalBalance
@@ -342,12 +342,31 @@ struct CashHome: View {
     // Occidente y Sagrada usan una superficie blanca completa para integrar
     // el fondo de sus logotipos, sin una tarjeta blanca secundaria.
     private func institution(_ account: CashAccount) -> some View {
-        let isWhite = account == .occidente || account == .sagrada
+        let profile = store.accountItem(account)
+        let style = profile?.colorStyle ?? "original"
+        let fillsWithPhoto = (profile?.imageFillsCard ?? false) && profile?.imageData != nil
+        let isWhite = !fillsWithPhoto && (style == "blanco" || (style == "original" && (account == .occidente || account == .sagrada)))
         let foreground: Color = isWhite ? CashTheme.background : .white
+        let cardColors: [Color] = {
+            switch style {
+            case "blanco": return [.white, .white]
+            case "azul": return [CashTheme.blue, Color(red: 0.06, green: 0.23, blue: 0.63)]
+            case "rojo": return [CashTheme.red, Color(red: 0.52, green: 0.02, blue: 0.13)]
+            case "verde": return [CashTheme.green, Color(red: 0.04, green: 0.29, blue: 0.18)]
+            case "grafito": return [CashTheme.raised, CashTheme.background]
+            default: return account.bankColors
+            }
+        }()
 
         return Button { showAccount(account, month) } label: {
             VStack(alignment: .leading, spacing: 13) {
-                if account == .cash {
+                if fillsWithPhoto {
+                    Color.clear.frame(height: 74)
+                } else if let data = profile?.imageData, let image = UIImage(data: data) {
+                    Image(uiImage: image).resizable().scaledToFit()
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .frame(height: 74)
+                } else if account == .cash {
                     // Decoración abstracta, NO contiene el ícono de Cash.
                     HStack(alignment: .center, spacing: 7) {
                         ForEach(0..<3, id: \.self) { _ in
@@ -361,17 +380,23 @@ struct CashHome: View {
                             .foregroundStyle(.white.opacity(0.56))
                     }
                     .frame(height: 74)
-                } else {
+                } else if !account.assetName.isEmpty {
                     CashBrandImage(filename: account.assetName, maxHeight: 74)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .frame(height: 74)
                         .accessibilityHidden(true)
+                } else {
+                    Image(systemName: "building.columns.fill")
+                        .font(.system(size: 47, weight: .medium))
+                        .foregroundStyle(foreground.opacity(0.86))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .frame(height: 74)
                 }
 
                 Spacer(minLength: 0)
 
                 VStack(alignment: .leading, spacing: 6) {
-                    Text(account.name)
+                    Text(store.accountName(account))
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(foreground.opacity(isWhite ? 0.83 : 0.88))
                         .lineLimit(1)
@@ -401,7 +426,18 @@ struct CashHome: View {
             .frame(height: 218)
             .background {
                 ZStack(alignment: .topTrailing) {
-                    if isWhite {
+                    if fillsWithPhoto, let data = profile?.imageData, let image = UIImage(data: data) {
+                        GeometryReader { geometry in
+                            Image(uiImage: image)
+                                .resizable()
+                                .scaledToFill()
+                                .frame(width: geometry.size.width, height: geometry.size.height)
+                                .clipped()
+                                .overlay(LinearGradient(colors: [.black.opacity(0.12),
+                                                                 .black.opacity(0.26), .black.opacity(0.82)],
+                                                        startPoint: .top, endPoint: .bottom))
+                        }
+                    } else if isWhite {
                         Color.white
                     } else if account == .cash {
                         LinearGradient(
@@ -418,7 +454,7 @@ struct CashHome: View {
                             .frame(width: 116, height: 116)
                             .offset(x: -8, y: 56)
                     } else {
-                        LinearGradient(colors: account.bankColors,
+                        LinearGradient(colors: cardColors,
                                        startPoint: .topLeading, endPoint: .bottomTrailing)
                     }
                 }
@@ -445,10 +481,10 @@ struct CashHome: View {
                 }
                 .buttonStyle(.plain)
                 .padding(11)
-                .accessibilityLabel(isHidden(account) ? "Mostrar saldo de \(account.name)" : "Ocultar saldo de \(account.name)")
+                .accessibilityLabel(isHidden(account) ? "Mostrar saldo de \(store.accountName(account))" : "Ocultar saldo de \(store.accountName(account))")
             }
         }
-        .accessibilityLabel(isHidden(account) ? "\(account.name), saldo oculto. Ver movimientos del mes" : "\(account.name), saldo disponible \(CashMoney.formatted(store.balance(account))). Ver movimientos del mes")
+        .accessibilityLabel(isHidden(account) ? "\(store.accountName(account)), saldo oculto. Ver movimientos del mes" : "\(store.accountName(account)), saldo disponible \(CashMoney.formatted(store.balance(account))). Ver movimientos del mes")
     }
     private var totalBalance: some View {
         CashCard {
@@ -497,30 +533,32 @@ struct CashHome: View {
 
 extension CashAccount {
     var assetName: String {
-        switch self {
-        case .cash: return "CashLogo"
-        case .occidente: return "Banco_Occidente"
-        case .bac: return "BAC"
-        case .atlantida: return "Banco_Atlantida"
-        case .sagrada: return "Cooperativa_Sagrada_Familia"
+        switch rawValue {
+        case "cash": return "CashLogo"
+        case "occidente": return "Banco_Occidente"
+        case "bac": return "BAC"
+        case "atlantida": return "Banco_Atlantida"
+        case "sagrada": return "Cooperativa_Sagrada_Familia"
+        default: return ""
         }
     }
     var bankColors: [Color] {
-        switch self {
-        case .cash: return [CashTheme.blue, CashTheme.secondary]
-        case .occidente: return [Color(red: 0.06, green: 0.21, blue: 0.13), Color(red: 0.03, green: 0.10, blue: 0.10)]
-        case .bac: return [Color(red: 0.91, green: 0.02, blue: 0.18), Color(red: 0.57, green: 0.01, blue: 0.12)]
-        case .atlantida: return [Color(red: 0.80, green: 0.07, blue: 0.15), Color(red: 0.44, green: 0.03, blue: 0.10)]
-        case .sagrada: return [Color(red: 0.10, green: 0.34, blue: 0.22), Color(red: 0.04, green: 0.20, blue: 0.13)]
+        switch rawValue {
+        case "cash": return [CashTheme.blue, CashTheme.secondary]
+        case "occidente": return [Color(red: 0.06, green: 0.21, blue: 0.13), Color(red: 0.03, green: 0.10, blue: 0.10)]
+        case "bac": return [Color(red: 0.91, green: 0.02, blue: 0.18), Color(red: 0.57, green: 0.01, blue: 0.12)]
+        case "atlantida": return [Color(red: 0.80, green: 0.07, blue: 0.15), Color(red: 0.44, green: 0.03, blue: 0.10)]
+        case "sagrada": return [Color(red: 0.10, green: 0.34, blue: 0.22), Color(red: 0.04, green: 0.20, blue: 0.13)]
+        default: return [CashTheme.blue, CashTheme.secondary]
         }
     }
     var accent: Color {
-        switch self {
-        case .cash: return CashTheme.blue
-        case .occidente: return .orange
-        case .bac: return CashTheme.red
-        case .atlantida: return .red
-        case .sagrada: return CashTheme.green
+        switch rawValue {
+        case "occidente": return .orange
+        case "bac": return CashTheme.red
+        case "atlantida": return .red
+        case "sagrada": return CashTheme.green
+        default: return CashTheme.blue
         }
     }
 }

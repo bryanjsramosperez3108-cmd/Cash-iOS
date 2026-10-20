@@ -30,7 +30,16 @@ final class CashStore: ObservableObject {
                     notice = "Se encontró una versión de datos no compatible. No se modificó ningún archivo."
                     return
                 }
-                ledger = decoded
+                // Solo se realiza una vez al pasar a V14. Se conserva el ledger
+                // original y se registra cuándo empiezan los ajustes fechados.
+                if decoded.historicalTrackingSince == nil {
+                    var upgraded = decoded
+                    upgraded.historicalTrackingSince = Date()
+                    try persist(upgraded)
+                    ledger = upgraded
+                } else {
+                    ledger = decoded
+                }
             } catch {
                 storageBlocked = true
                 notice = "No se pudo leer el archivo financiero. Los datos originales siguen almacenados; no guardes movimientos hasta resolverlo: \(error.localizedDescription)"
@@ -53,6 +62,7 @@ final class CashStore: ObservableObject {
             var newLedger = CashLedger()
             newLedger.operations = converted
             newLedger.migratedLegacyCount = converted.count
+            newLedger.historicalTrackingSince = Date()
             try persist(newLedger)
             ledger = newLedger
             if !converted.isEmpty {
@@ -79,9 +89,11 @@ final class CashStore: ObservableObject {
         guard !storageBlocked else {
             throw CashStoreError.message("El almacenamiento está bloqueado para proteger los datos originales. Contacta soporte antes de guardar nuevas operaciones.")
         }
-        try validate(next)
-        try persist(next)
-        ledger = next
+        var candidate = next
+        if candidate.historicalTrackingSince == nil { candidate.historicalTrackingSince = Date() }
+        try validate(candidate)
+        try persist(candidate)
+        ledger = candidate
     }
 
     // Aritmética exacta con comprobación de desbordamientos.
@@ -92,20 +104,7 @@ final class CashStore: ObservableObject {
     }
 
     private func currentBalance(_ account: CashAccount, in state: CashLedger) throws -> Int64 {
-        var result = state.openingCents[account.rawValue] ?? 0
-        for operation in state.operations {
-            switch operation.kind {
-            case .income where operation.account == account:
-                result = try checkedSum(result, operation.cents)
-            case .expense where operation.account == account:
-                result = try checkedSum(result, -operation.cents)
-            case .transfer:
-                if operation.account == account { result = try checkedSum(result, -operation.cents) }
-                if operation.destination == account { result = try checkedSum(result, operation.cents) }
-            default: break
-            }
-        }
-        return result
+        try CashHistoricalBalance.balance(account, in: state)
     }
 
     private func validate(_ state: CashLedger) throws {
@@ -125,15 +124,37 @@ final class CashStore: ObservableObject {
                 throw CashStoreError.message("Solo las transferencias tienen una cuenta de destino.")
             }
         }
-        for account in CashAccount.allCases {
-            guard (state.openingCents[account.rawValue] ?? 0) <= 9_000_000_000_000_000 else {
-                throw CashStoreError.message("El saldo inicial de \(account.name) excede el límite permitido.")
-            }
-            guard (state.openingCents[account.rawValue] ?? 0) >= 0 else {
-                throw CashStoreError.message("El saldo inicial de \(account.name) no puede ser negativo.")
+        let records = state.accountItems ?? CashUserAccount.defaults
+        guard records.count > 0, records.count <= 100,
+              Set(records.map(\.id)).count == records.count,
+              records.contains(where: { $0.id == CashAccount.cash.rawValue }),
+              records.allSatisfy({ !$0.id.isEmpty && !$0.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && $0.name.count <= 55 && ($0.imageData?.count ?? 0) <= 550_000 && ["original", "blanco", "azul", "rojo", "verde", "grafito"].contains($0.colorStyle) }) else {
+            throw CashStoreError.message("Las cuentas contienen datos inválidos o falta Efectivo.")
+        }
+        let knownAccounts = Set(records.map(\.id))
+        // V14: impedir ajustes adulterados, duplicados o a cuentas inexistentes.
+        let adjustments = state.balanceAdjustments ?? []
+        guard adjustments.count <= 20000,
+              Set(adjustments.map(\.id)).count == adjustments.count,
+              adjustments.allSatisfy({ knownAccounts.contains($0.accountID) &&
+                  $0.differenceCents >= -9_000_000_000_000_000 &&
+                  $0.differenceCents <= 9_000_000_000_000_000 &&
+                  $0.date.timeIntervalSince1970.isFinite }) else {
+            throw CashStoreError.message("El historial de ajustes contiene registros inválidos.")
+        }
+        guard state.operations.allSatisfy({ knownAccounts.contains($0.account.rawValue) && ($0.destination == nil || knownAccounts.contains($0.destination!.rawValue)) }) else {
+            throw CashStoreError.message("Hay movimientos vinculados a cuentas que no existen.")
+        }
+        guard state.openingCents.keys.allSatisfy({ knownAccounts.contains($0) }) else {
+            throw CashStoreError.message("Hay saldos de cuentas que no existen.")
+        }
+        for record in records {
+            let account = CashAccount(rawValue: record.id)
+            guard abs(Double(state.openingCents[record.id] ?? 0)) <= 9_000_000_000_000_000 else {
+                throw CashStoreError.message("El ajuste de saldo excede el máximo admitido.")
             }
             if try currentBalance(account, in: state) < 0 {
-                throw CashStoreError.message("Saldo insuficiente en \(account.name) según su balance actual. Revisa ingresos, gastos y transferencias.")
+                throw CashStoreError.message("Saldo insuficiente en \(record.name). Revisa sus operaciones y su ajuste de saldo.")
             }
         }
         // No rechazamos un gasto registrado con fecha anterior por un saldo
@@ -161,8 +182,10 @@ final class CashStore: ObservableObject {
     // 'persist' conserva el archivo anterior en CashLedger.previous.json.
     func restoreBackupLedger(_ incoming: CashLedger) throws {
         try checkRestoreCandidate(incoming)
-        try persist(incoming)
-        ledger = incoming
+        var restored = incoming
+        if restored.historicalTrackingSince == nil { restored.historicalTrackingSince = Date() }
+        try persist(restored)
+        ledger = restored
         storageBlocked = false
         notice = "Datos restaurados correctamente. Se recuperaron \(incoming.operations.count) movimientos."
     }
@@ -206,15 +229,111 @@ final class CashStore: ObservableObject {
         try commit(next)
     }
 
+    // Nunca se borran movimientos al eliminar una categoría.
+    // Si tiene movimientos, se reasignan a "Otros" del mismo tipo con consentimiento.
     func deleteCategory(_ item: CashUserCategory) throws {
-        guard !item.isBuiltIn else {
-            throw CashStoreError.message("Las categorías originales se pueden editar, pero no eliminar.")
+        var next = ledger
+        var categories = next.categoryItems ?? CashUserCategory.defaults
+        guard categories.contains(where: { $0.id == item.id && $0.kind == item.kind }) else {
+            throw CashStoreError.message("La categoría ya no existe.")
         }
-        guard !ledger.operations.contains(where: { ($0.categoryID ?? CashUserCategory.legacyID(for: $0)) == item.id }) else {
-            throw CashStoreError.message("Esta categoría tiene movimientos asociados. Puedes cambiar su nombre o imagen, pero no eliminarla.")
+        guard categories.filter({ $0.kind == item.kind }).count > 1 else {
+            throw CashStoreError.message("No se puede borrar la última categoría de este tipo.")
+        }
+        let affected = next.operations.indices.filter {
+            let op = next.operations[$0]
+            return (op.categoryID ?? CashUserCategory.legacyID(for: op)) == item.id
+        }
+        if !affected.isEmpty {
+            guard let alternative = categories.first(where: {
+                $0.kind == item.kind && $0.id != item.id &&
+                $0.name.localizedCaseInsensitiveCompare("Otros") == .orderedSame
+            }) else {
+                throw CashStoreError.message("Esta categoría tiene movimientos. Primero crea una categoría 'Otros' del mismo tipo para conservarlos.")
+            }
+            for index in affected {
+                next.operations[index].categoryID = alternative.id
+                next.operations[index].category = .other
+            }
+        }
+        categories.removeAll { $0.id == item.id }
+        next.categoryItems = categories
+        try commit(next)
+    }
+
+    func categoryLinkedCount(_ category: CashUserCategory) -> Int {
+        ledger.operations.filter {
+            ($0.categoryID ?? CashUserCategory.legacyID(for: $0)) == category.id
+        }.count
+    }
+
+    var accountItems: [CashUserAccount] { ledger.accountItems ?? CashUserAccount.defaults }
+    var accounts: [CashAccount] { accountItems.map { CashAccount(rawValue: $0.id) } }
+    func accountItem(_ account: CashAccount) -> CashUserAccount? {
+        accountItems.first { $0.id == account.rawValue }
+    }
+    func accountName(_ account: CashAccount) -> String {
+        accountItem(account)?.name ?? account.name
+    }
+    func saveAccount(_ record: CashUserAccount, desiredBalance: Int64) throws {
+        let name = record.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty && name.count <= 55 else {
+            throw CashStoreError.message("El nombre de la cuenta debe tener entre 1 y 55 caracteres.")
+        }
+        guard desiredBalance >= 0 && desiredBalance <= 9_000_000_000_000_000 else {
+            throw CashStoreError.message("El saldo debe ser positivo o cero y estar dentro del límite.")
+        }
+        guard (record.imageData?.count ?? 0) <= 550_000 else {
+            throw CashStoreError.message("La fotografía es demasiado grande.")
         }
         var next = ledger
-        next.categoryItems = (next.categoryItems ?? CashUserCategory.defaults).filter { $0.id != item.id }
+        var items = next.accountItems ?? CashUserAccount.defaults
+        guard items.count < 100 || items.contains(where: { $0.id == record.id }) else {
+            throw CashStoreError.message("Se alcanzó el máximo de 100 cuentas.")
+        }
+        guard !items.contains(where: { $0.id != record.id && $0.name.localizedCaseInsensitiveCompare(name) == .orderedSame }) else {
+            throw CashStoreError.message("Ya existe una cuenta con ese nombre.")
+        }
+        var updated = record
+        updated.name = name
+        if let index = items.firstIndex(where: { $0.id == record.id }) {
+            updated.isBuiltIn = items[index].isBuiltIn
+            items[index] = updated
+        } else {
+            updated.isBuiltIn = false
+            items.append(updated)
+        }
+        next.accountItems = items
+        let account = CashAccount(rawValue: updated.id)
+        let current = try currentBalance(account, in: next)
+        // V14: diferencia fechada, sin crear ingresos/gastos ni alterar el pasado.
+        let (difference, overflow) = desiredBalance.subtractingReportingOverflow(current)
+        guard !overflow else { throw CashStoreError.message("Ajuste de saldo fuera del límite.") }
+        if difference != 0 {
+            var entries = next.balanceAdjustments ?? []
+            entries.append(CashBalanceAdjustment(accountID: updated.id,
+                                                differenceCents: difference, date: Date()))
+            next.balanceAdjustments = entries
+        }
+        try commit(next)
+    }
+
+    func deleteAccount(_ account: CashAccount) throws {
+        guard account != .cash else {
+            throw CashStoreError.message("Efectivo es la cuenta principal y no se puede eliminar.")
+        }
+        guard let record = accountItem(account) else {
+            throw CashStoreError.message("La cuenta ya no existe.")
+        }
+        guard !ledger.operations.contains(where: { $0.account == account || $0.destination == account }),
+              !(ledger.balanceAdjustments ?? []).contains(where: { $0.accountID == account.rawValue }),
+              balance(account) == 0 else {
+            throw CashStoreError.message("Esta cuenta tiene saldo o movimientos. Transfiere el saldo y conserva su historial antes de eliminarla.")
+        }
+        var next = ledger
+        next.accountItems = accountItems.filter { $0.id != record.id }
+        next.openingCents.removeValue(forKey: record.id)
+        next.balanceAdjustments?.removeAll { $0.accountID == record.id }
         try commit(next)
     }
 
@@ -241,8 +360,20 @@ final class CashStore: ObservableObject {
     func balance(_ account: CashAccount) -> Int64 {
         (try? currentBalance(account, in: ledger)) ?? 0
     }
+
+    // Saldo inicial, flujos y saldo al final del mes elegido.
+    func accountMonthSummary(_ account: CashAccount, month: Date) -> CashAccountMonthSummary? {
+        try? CashHistoricalBalance.month(account, in: ledger, date: month)
+    }
+
+    // Antes de V14 existían ajustes sin fecha; no inventamos su cronología.
+    func historicalBalanceIsEstimated(month: Date) -> Bool {
+        guard let trackingDate = ledger.historicalTrackingSince else { return true }
+        guard let interval = Calendar.current.dateInterval(of: .month, for: month) else { return true }
+        return interval.start <= trackingDate
+    }
     var totalBalance: Int64 {
-        CashAccount.allCases.reduce(Int64(0)) { $0 &+ balance($1) }
+        accounts.reduce(Int64(0)) { $0 &+ balance($1) }
     }
     var sorted: [CashOperation] {
         ledger.operations.sorted {

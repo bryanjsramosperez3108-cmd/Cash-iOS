@@ -55,20 +55,58 @@ enum CashCategory: String, Codable, CaseIterable, Identifiable {
     }
 }
 
-enum CashAccount: String, CaseIterable, Codable, Identifiable {
-    case cash, occidente, bac, atlantida, sagrada
+// V10: los valores de las cuentas siguen codificándose como cadenas simples
+// ("cash", "bac", etc.), exactamente como en los respaldos V3-V9.
+struct CashAccount: RawRepresentable, Hashable, Codable, Identifiable, CaseIterable {
+    let rawValue: String
+    init(rawValue: String) { self.rawValue = rawValue }
+    init(from decoder: Decoder) throws {
+        let value = try decoder.singleValueContainer().decode(String.self)
+        guard !value.isEmpty else {
+            throw DecodingError.dataCorruptedError(in: try decoder.singleValueContainer(),
+                debugDescription: "Identificador de cuenta vacío")
+        }
+        self.rawValue = value
+    }
+    func encode(to encoder: Encoder) throws {
+        var value = encoder.singleValueContainer()
+        try value.encode(rawValue)
+    }
     var id: String { rawValue }
+    static let cash = Self(rawValue: "cash")
+    static let occidente = Self(rawValue: "occidente")
+    static let bac = Self(rawValue: "bac")
+    static let atlantida = Self(rawValue: "atlantida")
+    static let sagrada = Self(rawValue: "sagrada")
+    static var allCases: [Self] { [.cash, .occidente, .bac, .atlantida, .sagrada] }
     var name: String {
-        switch self {
-        case .cash: return "Efectivo"
-        case .occidente: return "Banco de Occidente"
-        case .bac: return "BAC"
-        case .atlantida: return "Banco Atlántida"
-        case .sagrada: return "Cooperativa Sagrada Familia"
+        switch rawValue {
+        case "cash": "Efectivo"
+        case "occidente": "Banco de Occidente"
+        case "bac": "BAC"
+        case "atlantida": "Banco Atlántida"
+        case "sagrada": "Cooperativa Sagrada Familia"
+        default: rawValue
         }
     }
-    var symbol: String {
-        self == .cash ? "banknote.fill" : "building.columns.fill"
+    var symbol: String { self == .cash ? "banknote.fill" : "building.columns.fill" }
+}
+
+// V10: identidad visual editable, incluida en CashLedger y su respaldo JSON.
+struct CashUserAccount: Identifiable, Codable, Equatable {
+    var id: String
+    var name: String
+    var imageData: Data? = nil
+    // "original", "blanco", "azul", "rojo", "verde", "grafito"
+    var colorStyle: String = "original"
+    // Opcional para permitir restaurar sin cambios los JSON antiguos (V3-V10).
+    var imageFillsCard: Bool? = nil
+    var isBuiltIn: Bool = false
+
+    static var defaults: [CashUserAccount] {
+        CashAccount.allCases.map {
+            CashUserAccount(id: $0.rawValue, name: $0.name, isBuiltIn: true)
+        }
     }
 }
 
@@ -94,6 +132,21 @@ struct CashLedger: Codable {
     var migratedLegacyCount: Int = 0
     // Opcional para preservar la decodificación de CashLedger.json versión 2 ya existente.
     var categoryItems: [CashUserCategory]? = nil
+    // Opcional: los respaldos antiguos sin esta clave siguen siendo válidos.
+    var accountItems: [CashUserAccount]? = nil
+    // V14: ajustes NUEVOS con fecha real; nil en copias de seguridad V3-V13.
+    var balanceAdjustments: [CashBalanceAdjustment]? = nil
+    // Fecha desde la que Cash registra cambios manuales con fecha.
+    // Si falta, el historial anterior debe tratarse como reconstruido.
+    var historicalTrackingSince: Date? = nil
+}
+
+// No son ingresos ni gastos: únicamente corrigen el saldo de una cuenta.
+struct CashBalanceAdjustment: Codable, Identifiable, Equatable {
+    var id: UUID = UUID()
+    var accountID: String
+    var differenceCents: Int64
+    var date: Date
 }
 
 struct CashUserCategory: Identifiable, Codable, Equatable {

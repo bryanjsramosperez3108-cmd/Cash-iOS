@@ -61,10 +61,10 @@ struct CashEditor: View {
                 if kind == .transfer {
                     Section("Transferencia") {
                         Picker("Cuenta de origen", selection: $account) {
-                            ForEach(CashAccount.allCases) { account in Text(account.name).tag(account) }
+                            ForEach(store.accounts) { account in Text(store.accountName(account)).tag(account) }
                         }
                         Picker("Cuenta de destino", selection: $destination) {
-                            ForEach(CashAccount.allCases) { account in Text(account.name).tag(account) }
+                            ForEach(store.accounts) { account in Text(store.accountName(account)).tag(account) }
                         }
                         Picker("Categoría", selection: $categoryID) {
                             ForEach(store.categories(for: .transfer)) { option in
@@ -83,7 +83,7 @@ struct CashEditor: View {
                         TextField("Concepto", text: $title)
                             .textInputAutocapitalization(.sentences)
                         Picker(kind == .income ? "Cuenta destino" : "Cuenta de origen", selection: $account) {
-                            ForEach(CashAccount.allCases) { account in Text(account.name).tag(account) }
+                            ForEach(store.accounts) { account in Text(store.accountName(account)).tag(account) }
                         }
                         Picker("Categoría", selection: $categoryID) {
                             ForEach(store.categories(for: kind)) { option in
