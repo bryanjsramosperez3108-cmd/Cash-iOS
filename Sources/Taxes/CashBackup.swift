@@ -82,6 +82,13 @@ enum CashBackupService {
         let filename = "Cash-Respaldo-\(formatter.string(from: Date()))-\(UUID().uuidString.prefix(6)).json"
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(filename)
         try contents.write(to: url, options: .atomic)
+        // Catálogo enriquecido para BUDGET, sin modificar el ledger original.
+        do {
+            try CashBudgetBackupEnricher.enhanceExport(at: url, ledger: ledger)
+        } catch {
+            // Mantener el respaldo original válido aun si falla el enriquecimiento.
+            NSLog("CASH: no se pudo anexar el catálogo para BUDGET: %@", String(describing: type(of: error)))
+        }
         return url
     }
 
